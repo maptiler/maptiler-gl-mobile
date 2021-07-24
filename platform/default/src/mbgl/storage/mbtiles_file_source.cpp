@@ -15,6 +15,10 @@
 #include <mbgl/util/chrono.hpp>
 
 #include <mbgl/storage/sqlite3.hpp>
+
+#if defined(__QT__) && defined(_WIN32)
+#include <QtZlib/zlib.h>
+#else
 #include <zlib.h>
 
 namespace {
