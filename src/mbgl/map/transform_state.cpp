@@ -46,14 +46,23 @@ void TransformState::setProperties(const TransformStateProperties& properties) {
     if (properties.y) {
         setY(*properties.y);
     }
+    if (properties.z) {
+        setZ(*properties.z);
+    }
     if (properties.scale) {
         setScale(*properties.scale);
     }
     if (properties.bearing) {
         setBearing(*properties.bearing);
     }
+    if (properties.fov) {
+        setFieldOfView(*properties.fov);
+    }
     if (properties.pitch) {
         setPitch(*properties.pitch);
+    }
+    if (properties.roll) {
+        setRoll(*properties.roll);
     }
     if (properties.xSkew) {
         setXSkew(*properties.xSkew);
@@ -120,7 +129,8 @@ void TransformState::getProjMatrix(mat4& projMatrix, uint16_t nearZ, bool aligne
     // (the distance between[width/2, height/2] and [width/2 + 1, height/2])
     // See https://github.com/mapbox/mapbox-gl-native/pull/15195 for details.
     // See TransformState::fov description: fov = 2 * arctan((height / 2) / (height * 1.5)).
-    const double tanFovAboveCenter = (size.height * 0.5 + offset.y) / (size.height * 1.5);
+    const double tanFovAboveCenter = (0.5 + offset.y / size.height) * 2.0 * std::tan(fov / 2.0) *
+                                     (std::abs(std::cos(roll)) + std::abs(std::sin(roll)) * size.width / size.height);
     const double tanMultiple = tanFovAboveCenter * std::tan(getPitch());
     assert(tanMultiple < 1);
     // Calculate z distance of the farthest fragment that should be rendered.
@@ -204,13 +214,13 @@ void TransformState::updateCameraState() const {
     const double dy = 0.5 * worldSize - y;
 
     // Set camera orientation and move it to a proper distance from the map
-    camera.setOrientation(getPitch(), getBearing());
+    camera.setOrientation(getRoll(), getPitch(), getBearing());
 
     const vec3 forward = camera.forward();
     const vec3 orbitPosition = {{-forward[0] * cameraToCenterDistance,
                                  -forward[1] * cameraToCenterDistance,
                                  -forward[2] * cameraToCenterDistance}};
-    vec3 cameraPosition = {{dx + orbitPosition[0], dy + orbitPosition[1], orbitPosition[2]}};
+    vec3 cameraPosition = {{dx + orbitPosition[0], dy + orbitPosition[1], z + orbitPosition[2]}};
 
     cameraPosition[0] /= worldSize;
     cameraPosition[1] /= worldSize;
@@ -231,7 +241,8 @@ void TransformState::updateStateFromCamera() {
     // Compute bearing and pitch
     double newBearing;
     double newPitch;
-    camera.getOrientation(newPitch, newBearing);
+    double newRoll;
+    camera.getOrientation(newRoll, newPitch, newBearing);
     newPitch = util::clamp(newPitch, minPitch, maxPitch);
 
     // Compute zoom level from the camera altitude
@@ -246,6 +257,7 @@ void TransformState::updateStateFromCamera() {
     setLatLngZoom(latLngFromMercator(mercatorPoint), scaleZoom(newScale));
     setBearing(newBearing);
     setPitch(newPitch);
+    setRoll(newRoll);
 }
 
 FreeCameraOptions TransformState::getFreeCameraOptions() const {
@@ -428,10 +440,13 @@ void TransformState::setViewportMode(ViewportMode val) {
 CameraOptions TransformState::getCameraOptions(const std::optional<EdgeInsets>& padding) const {
     return CameraOptions()
         .withCenter(getLatLng())
+        .withCenterAltitude(getCenterAltitude())
         .withPadding(padding ? padding : edgeInsets)
         .withZoom(getZoom())
         .withBearing(util::rad2deg(-bearing))
-        .withPitch(util::rad2deg(pitch));
+        .withPitch(util::rad2deg(pitch))
+        .withRoll(util::rad2deg(roll))
+        .withFov(util::rad2deg(fov));
 }
 
 // MARK: - EdgeInsets
@@ -447,6 +462,10 @@ void TransformState::setEdgeInsets(const EdgeInsets& val) {
 
 LatLng TransformState::getLatLng(LatLng::WrapMode wrapMode) const {
     return {util::rad2deg(2 * std::atan(std::exp(y / Cc)) - 0.5 * pi), -x / Bc, wrapMode};
+}
+
+double TransformState::getCenterAltitude() const {
+    return z * Projection::getMetersPerPixelAtLatitude(getLatLng().latitude(), getZoom());
 }
 
 double TransformState::pixel_x() const {
@@ -539,6 +558,14 @@ double TransformState::getMaxPitch() const {
     return maxPitch;
 }
 
+double TransformState::getMinFieldOfView() const {
+    return minFov;
+}
+
+double TransformState::getMaxFieldOfView() const {
+    return maxFov;
+}
+
 // MARK: - Scale
 double TransformState::getScale() const {
     return scale;
@@ -575,6 +602,17 @@ void TransformState::setY(double val) {
     }
 }
 
+double TransformState::getZ() const {
+    return z;
+}
+
+void TransformState::setZ(double val) {
+    if (z != val) {
+        z = val;
+        requestMatricesUpdate = true;
+    }
+}
+
 // MARK: - Rotation
 
 double TransformState::getBearing() const {
@@ -590,6 +628,24 @@ void TransformState::setBearing(double val) {
 
 float TransformState::getFieldOfView() const {
     return static_cast<float>(fov);
+}
+
+void TransformState::setFieldOfView(double val) {
+    if (fov != val) {
+        fov = val;
+        requestMatricesUpdate = true;
+    }
+}
+
+double TransformState::getRoll() const {
+    return roll;
+}
+
+void TransformState::setRoll(double val) {
+    if (roll != val) {
+        roll = val;
+        requestMatricesUpdate = true;
+    }
 }
 
 float TransformState::getCameraToCenterDistance() const {
@@ -715,7 +771,7 @@ TileCoordinate TransformState::screenCoordinateToTileCoordinate(const ScreenCoor
 
     double z0 = coord0[2] / w0;
     double z1 = coord1[2] / w1;
-    double t = z0 == z1 ? 0 : (targetZ - z0) / (z1 - z0);
+    double t = (z1 / z0 > 0.5) ? 0 : (targetZ - z0) / (z1 - z0);
 
     Point<double> p = util::interpolate(p0, p1, t) / scale * static_cast<double>(1 << atZoom);
     return {{p.x, p.y}, static_cast<double>(atZoom)};
@@ -796,6 +852,11 @@ void TransformState::setLatLngZoom(const LatLng& latLng, double zoom) {
         0.5 * Cc * std::log((1 + f) / (1 - f)),
     };
     setScalePoint(newScale, point);
+}
+
+void TransformState::setCenterAltitude(double alt_m) {
+    z = alt_m / Projection::getMetersPerPixelAtLatitude(getLatLng().latitude(), getZoom());
+    requestMatricesUpdate = true;
 }
 
 void TransformState::setScalePoint(const double newScale, const ScreenCoordinate& point) {

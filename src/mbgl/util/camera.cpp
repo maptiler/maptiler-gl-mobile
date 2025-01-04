@@ -15,7 +15,7 @@ using namespace std::numbers;
 namespace mbgl {
 
 namespace {
-double vec2Len(const vec2& v) noexcept {
+/*double vec2Len(const vec2& v) noexcept {
     return std::sqrt(v[0] * v[0] + v[1] * v[1]);
 };
 
@@ -25,7 +25,7 @@ double vec2Dot(const vec2& a, const vec2& b) noexcept {
 
 vec2 vec2Scale(const vec2& v, double s) noexcept {
     return vec2{{v[0] * s, v[1] * s}};
-};
+};*/
 } // namespace
 
 namespace util {
@@ -65,12 +65,13 @@ static vec3 toMercator(const LatLng& location, double altitudeMeters) noexcept {
              altitudeMeters * pixelsPerMeter / worldSize}};
 }
 
-static Quaternion orientationFromPitchBearing(double pitch, double bearing) noexcept {
+static Quaternion orientationFromRollPitchBearing(double roll, double pitch, double bearing) noexcept {
     // Both angles have to be negated to achieve CW rotation around the axis of rotation
-    const Quaternion rotBearing = Quaternion::fromAxisAngle({{0.0, 0.0, 1.0}}, -bearing);
-    const Quaternion rotPitch = Quaternion::fromAxisAngle({{1.0, 0.0, 0.0}}, -pitch);
+    Quaternion rotBearing = Quaternion::fromAxisAngle({{0.0, 0.0, 1.0}}, -bearing);
+    Quaternion rotPitch = Quaternion::fromAxisAngle({{1.0, 0.0, 0.0}}, -pitch);
+    Quaternion rotRoll = Quaternion::fromAxisAngle({{0.0, 0.0, 1.0}}, -roll);
 
-    return rotBearing.multiply(rotPitch);
+    return rotBearing.multiply(rotPitch).multiply(rotRoll);
 }
 
 static void updateTransform(mat4& transform, const Quaternion& orientation) noexcept {
@@ -167,16 +168,17 @@ vec3 Camera::up() const noexcept {
     return {{-column[0], -column[1], -column[2]}};
 }
 
-void Camera::getOrientation(double& pitch, double& bearing) const noexcept {
+void Camera::getOrientation(double& roll, double& pitch, double& bearing) const noexcept {
     const vec3 f = forward();
     const vec3 r = right();
 
     bearing = std::atan2(-r[1], r[0]);
     pitch = std::atan2(std::sqrt(f[0] * f[0] + f[1] * f[1]), -f[2]);
+    roll = 0; // TODO
 }
 
-void Camera::setOrientation(double pitch, double bearing) noexcept {
-    orientation = orientationFromPitchBearing(pitch, bearing);
+void Camera::setOrientation(double roll, double pitch, double bearing) noexcept {
+    orientation = orientationFromRollPitchBearing(roll, pitch, bearing);
     updateTransform(transform, orientation);
 }
 
@@ -190,32 +192,13 @@ void Camera::setPosition(const vec3& position) noexcept {
 }
 
 std::optional<Quaternion> Camera::orientationFromFrame(const vec3& forward, const vec3& up) noexcept {
-    vec3 upVector = up;
-
-    const vec2 xyForward = {{forward[0], forward[1]}};
-    vec2 xyUp = {{up[0], up[1]}};
-    const double epsilon = 1e-15;
-
-    // Remove roll-component of the resulting orientation by projecting
-    // the up-vector to the forward vector on xy-plane
-    if (vec2Len(xyForward) >= epsilon) {
-        const vec2 xyDir = vec2Scale(xyForward, 1.0 / vec2Len(xyForward));
-
-        xyUp = vec2Scale(xyDir, vec2Dot(xyUp, xyDir));
-        upVector[0] = xyUp[0];
-        upVector[1] = xyUp[1];
-    }
-
-    const vec3 right = vec3Cross(upVector, forward);
-
-    if (vec3Length(right) < epsilon) {
-        return std::nullopt;
-    }
+    const vec3 right = vec3Cross(up, forward);
 
     const double bearing = std::atan2(-right[1], right[0]);
     const double pitch = std::atan2(std::sqrt(forward[0] * forward[0] + forward[1] * forward[1]), -forward[2]);
+    const double roll = 0; // TODO
 
-    return util::orientationFromPitchBearing(pitch, bearing);
+    return util::orientationFromRollPitchBearing(pitch, bearing, roll);
 }
 } // namespace util
 
@@ -255,14 +238,12 @@ void FreeCameraOptions::lookAtPoint(const LatLng& location, const std::optional<
     // Flip z-component of the up vector if it's pointing downwards
     up[2] = std::abs(up[2]);
 
-    const auto newOrientation = util::Camera::orientationFromFrame(forward, up);
-    if (newOrientation) {
-        orientation = newOrientation.value().m;
-    }
+    orientation = util::Camera::orientationFromFrame(forward, up)->m;
 }
 
-void FreeCameraOptions::setPitchBearing(double pitch, double bearing) noexcept {
-    orientation = util::orientationFromPitchBearing(util::deg2rad(pitch), util::deg2rad(bearing)).m;
+void FreeCameraOptions::setRollPitchBearing(double roll, double pitch, double bearing) noexcept {
+    orientation =
+        util::orientationFromRollPitchBearing(util::deg2rad(roll), util::deg2rad(pitch), util::deg2rad(bearing)).m;
 }
 
 } // namespace mbgl
